@@ -12,6 +12,7 @@ type Message struct {
 	TimeToLive            int                    `json:"time_to_live,omitempty"`
 	RestrictedPackageName string                 `json:"restricted_package_name,omitempty"`
 	DryRun                bool                   `json:"dry_run,omitempty"`
+	NotificationKey       string                 `json:"notification_key,omitempty"`
 }
 
 // NewMessage returns a new Message with the specified payload
