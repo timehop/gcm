@@ -130,7 +130,7 @@ func (s *Sender) SendNoRetry(msg *Message) (*Response, *HTTPError) {
 func parseRetryAfter(r string) (int, error) {
 	// if not set
 	if r == "" {
-		return 0, errors.New("Empty 'Retry-After' header")
+		return 0, fmt.Errorf("Empty Retry-After header")
 	}
 
 	// if set as an integer delta (assumed to be in seconds)
@@ -140,11 +140,11 @@ func parseRetryAfter(r string) (int, error) {
 
 	// if set as a date, convert to a time in seconds
 	if ra, err := time.Parse(time.RFC1123, r); err == nil {
-		delta := (ra.UnixNano() - time.Now().UnixNano()) / time.Second
-		return delta, err
+		delta := (ra.UnixNano() - time.Now().UnixNano()) / 1e9
+		return int(delta), err
 	}
 	fmt.Printf("#936r Unparseable 'Retry-After' header: %s", r)
-	return 0, errors.New("Unparseable 'Retry-After' header: %s", r)
+	return 0, fmt.Errorf("Unparseable 'Retry-After' header: %s", r)
 }
 
 // Send sends a message to the GCM server, retrying in case of service
@@ -155,7 +155,7 @@ func parseRetryAfter(r string) (int, error) {
 // result, this method may block for several seconds.
 func (s *Sender) Send(msg *Message, retries int) (*Response, *HTTPError) {
 	if retries < 0 {
-		return nil, &HTTPError{Err: errors.New("'retries' must be positive")}
+		return nil, &HTTPError{Err: fmt.Errorf("'retries' must be positive")}
 	}
 
 	// Send the message for the first time.
