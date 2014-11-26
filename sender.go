@@ -29,6 +29,20 @@ const (
 // Declared as a mutable variable for testing purposes.
 var gcmSendEndpoint = GcmSendEndpoint
 
+// GCM response types
+const (
+	ResponseErrorMissingRegistration = "MissingRegistration"
+	ResponseErrorInvalidRegistration = "InvalidRegistration"
+	ResponseErrorMismatchSenderID    = "MismatchSenderId"
+	ResponseErrorNotRegistered       = "NotRegistered"
+	ResponseErrorMessageTooBig       = "MessageTooBig"
+	ResponseErrorInvalidDataKey      = "InvalidDataKey"
+	ResponseErrorInvalidTTL          = "InvalidTtl"
+	ResponseErrorUnavailable         = "Unavailable"
+	ResponseErrorInternalServerError = "InternalServerError"
+	ResponseErrorInvalidPackageName  = "InvalidPackageName"
+)
+
 // // Errors
 // type JSONParseError struct{ error }
 // type UnauthorizedError struct{ error }
@@ -241,6 +255,7 @@ func min(a, b int) int {
 	return b
 }
 
+// max returns the larger of two integers.
 func max(a, b int) int {
 	if a >= b {
 		return a
