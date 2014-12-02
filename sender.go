@@ -17,7 +17,7 @@ const (
 	// GcmSendEndpoint is the endpoint for sending messages to the GCM server.
 	GcmSendEndpoint = "https://android.googleapis.com/gcm/send"
 	// Initial delay (ms) before first retry, without jitter.
-	backoffInitialDelay = 1000
+	initialBackoffDelay = 1000
 	// Maximum delay (ms) before a retry.
 	maxBackoffDelay = 1024000
 	// Percentage jitter to use when retrying.  Jitter is a random variation in
@@ -185,8 +185,10 @@ func (s *Sender) Send(msg *Message, retries int) (*Response, *HTTPError) {
 
 	// One or more messages failed to send.
 	regIDs := msg.RegistrationIDs // store the original RegistrationIDs
+	// TODO: Don't modify the msg object via the pointer, as we may have
+	// multiple goroutines acting on it at once
 	allResults := make(map[string]Result, len(regIDs))
-	backoff := backoffInitialDelay
+	backoff := initialBackoffDelay
 	for i := 0; updateStatus(msg, resp, allResults) > 0 && i < retries; i++ {
 		sleepTime := calculateSleep(backoff)
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
