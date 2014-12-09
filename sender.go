@@ -31,16 +31,17 @@ var gcmSendEndpoint = GcmSendEndpoint
 
 // GCM response types
 const (
-	ResponseErrorMissingRegistration = "MissingRegistration"
-	ResponseErrorInvalidRegistration = "InvalidRegistration"
-	ResponseErrorMismatchSenderID    = "MismatchSenderId"
-	ResponseErrorNotRegistered       = "NotRegistered"
-	ResponseErrorMessageTooBig       = "MessageTooBig"
-	ResponseErrorInvalidDataKey      = "InvalidDataKey"
-	ResponseErrorInvalidTTL          = "InvalidTtl"
-	ResponseErrorUnavailable         = "Unavailable"
-	ResponseErrorInternalServerError = "InternalServerError"
-	ResponseErrorInvalidPackageName  = "InvalidPackageName"
+	ResponseErrorMissingRegistration       = "MissingRegistration"
+	ResponseErrorInvalidRegistration       = "InvalidRegistration"
+	ResponseErrorMismatchSenderID          = "MismatchSenderId"
+	ResponseErrorNotRegistered             = "NotRegistered"
+	ResponseErrorMessageTooBig             = "MessageTooBig"
+	ResponseErrorInvalidDataKey            = "InvalidDataKey"
+	ResponseErrorInvalidTTL                = "InvalidTtl"
+	ResponseErrorUnavailable               = "Unavailable"
+	ResponseErrorInternalServerError       = "InternalServerError"
+	ResponseErrorInvalidPackageName        = "InvalidPackageName"
+	ResponseErrorDeviceMessageRateExceeded = "DeviceMessageRateExceeded"
 )
 
 // // Errors
@@ -135,30 +136,8 @@ func (s *Sender) SendNoRetry(msg *Message) (*Response, *HTTPError) {
 	if err != nil {
 		return response, &HTTPError{Err: err}
 	}
-	return response, nil
-}
-
-// parseRetryAfter attempts to parse the contents of the Retry-After http
-// header.  It returns the time in seconds if successful, and an error for
-// either an unparseable value or a nil value.
-func parseRetryAfter(r string) (int, error) {
-	// if not set
-	if r == "" {
-		return 0, fmt.Errorf("Empty Retry-After header")
-	}
-
-	// if set as an integer delta (assumed to be in seconds)
-	if delta, err := strconv.Atoi(r); err == nil {
-		return max(delta, 0), err
-	}
-
-	// if set as a date, convert to a time in seconds
-	if ra, err := time.Parse(time.RFC1123, r); err == nil {
-		delta := (ra.UnixNano() - time.Now().UnixNano()) / 1e9
-		return int(delta), err
-	}
-	fmt.Printf("#936r Unparseable 'Retry-After' header: %s", r)
-	return 0, fmt.Errorf("Unparseable 'Retry-After' header: %s", r)
+	// success response
+	return response, &HTTPError{StatusCode: http.StatusOK}
 }
 
 // Send sends a message to the GCM server, retrying in case of service
@@ -173,14 +152,14 @@ func (s *Sender) Send(msg *Message, retries int) (*Response, *HTTPError) {
 	}
 
 	// Send the message for the first time.
-	resp, err := s.SendNoRetry(msg)
-	if err != nil {
-		return nil, &HTTPError{Err: err}
+	resp, httpErr := s.SendNoRetry(msg)
+	if httpErr.Err != nil {
+		return nil, httpErr
 	}
 
 	// if there were no errors, or retries = 0, return the result
 	if resp.Failure == 0 || retries == 0 {
-		return resp, err // err should always be nil here
+		return resp, httpErr // err should always be nil here
 	}
 
 	// One or more messages failed to send.
@@ -193,9 +172,10 @@ func (s *Sender) Send(msg *Message, retries int) (*Response, *HTTPError) {
 		sleepTime := calculateSleep(backoff)
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 		backoff = min(2*backoff, maxBackoffDelay)
-		if resp, err = s.SendNoRetry(msg); err != nil {
+		if resp, httpErr = s.SendNoRetry(msg); httpErr.Err != nil {
+			// set registration ids back to their original values
 			msg.RegistrationIDs = regIDs
-			return nil, &HTTPError{Err: err}
+			return nil, httpErr
 		}
 	}
 
@@ -225,7 +205,30 @@ func (s *Sender) Send(msg *Message, retries int) (*Response, *HTTPError) {
 		Failure:      failure,
 		CanonicalIDs: canonicalIDs,
 		Results:      finalResults,
-	}, nil
+	}, httpErr
+}
+
+// parseRetryAfter attempts to parse the contents of the Retry-After http
+// header.  It returns the time in seconds if successful, and an error for
+// either an unparseable value or a nil value.
+func parseRetryAfter(r string) (int, error) {
+	// if not set
+	if r == "" {
+		return 0, fmt.Errorf("Empty Retry-After header")
+	}
+
+	// if set as an integer delta (assumed to be in seconds)
+	if delta, err := strconv.Atoi(r); err == nil {
+		return max(delta, 0), err
+	}
+
+	// if set as a date, convert to a time in seconds
+	if ra, err := time.Parse(time.RFC1123, r); err == nil {
+		delta := (ra.UnixNano() - time.Now().UnixNano()) / 1e9
+		return int(delta), err
+	}
+	fmt.Printf("#936r Unparseable 'Retry-After' header: %s", r)
+	return 0, fmt.Errorf("Unparseable 'Retry-After' header: %s", r)
 }
 
 func calculateSleep(backoff int) int {
@@ -269,7 +272,7 @@ func max(a, b int) int {
 // initializes a zeroed http.Client if one has not been provided.
 func checkSender(sender *Sender) error {
 	if sender.APIKey == "" {
-		return errors.New("the sender's API key must not be empty")
+		return errors.New("The sender's API key must not be empty")
 	}
 	if sender.HTTP == nil {
 		sender.HTTP = new(http.Client)

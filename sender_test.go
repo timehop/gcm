@@ -106,8 +106,8 @@ func TestSendNoRetrySuccess(t *testing.T) {
 	defer server.Close()
 	sender := &Sender{APIKey: "test"}
 	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
-	if _, err := sender.SendNoRetry(msg); err != nil {
-		t.Fatalf("test failed with error: %s", err)
+	if _, err := sender.SendNoRetry(msg); err.Err != nil {
+		t.Fatalf("test failed with error: %s", err.Err)
 	}
 }
 
@@ -129,7 +129,7 @@ func TestSendOneRetrySuccess(t *testing.T) {
 	defer server.Close()
 	sender := &Sender{APIKey: "test"}
 	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
-	if _, err := sender.Send(msg, 1); err != nil {
+	if _, err := sender.Send(msg, 1); err.Err != nil {
 		t.Fatal("send should succeed after one retry")
 	}
 }
@@ -143,7 +143,7 @@ func TestSendOneRetryFailure(t *testing.T) {
 	sender := &Sender{APIKey: "test"}
 	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
 	resp, err := sender.Send(msg, 1)
-	if err != nil || resp.Failure != 1 {
+	if err.Err != nil || resp.Failure != 1 {
 		t.Fatal("send should return response with one failure")
 	}
 }
