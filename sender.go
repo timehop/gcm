@@ -44,11 +44,6 @@ const (
 	ResponseErrorDeviceMessageRateExceeded = "DeviceMessageRateExceeded"
 )
 
-// // Errors
-// type JSONParseError struct{ error }
-// type UnauthorizedError struct{ error }
-// type UnknownError struct{ error }
-
 const ()
 
 // Sender abstracts the interaction between the application server and the

@@ -1,9 +1,11 @@
 gcm
 ===
 
+This is a modified version of the gcm library @alexjlockwood with some changes suggested by @timehop.  However the message responses are quite different as the original library didn't make it feasible to distinguish between different GCM error responses, and didn't handle the 'Retry-After' headers that Google say are mandatory (or they may block your account).
+
 The Android SDK provides a nice convenience library ([com.google.android.gcm.server](http://developer.android.com/reference/com/google/android/gcm/server/package-summary.html)) that greatly simplifies the interaction between Java-based application servers and Google's GCM servers. However, Google has not provided much support for application servers implemented in languages other than Java, specifically those written in the Go programming language. The `gcm` package helps to fill in this gap, providing a simple interface for sending GCM messages and automatically retrying requests in case of service unavailability.
 
-Documentation: http://godoc.org/github.com/alexjlockwood/gcm
+Documentation: http://godoc.org/github.com/johngb/gcm
 
 Getting Started
 ---------------
@@ -11,13 +13,13 @@ Getting Started
 To install gcm, use `go get`:
 
 ```bash
-go get github.com/alexjlockwood/gcm
+go get github.com/johngb/gcm
 ```
 
 Import gcm with the following:
 
 ```go
-import "github.com/alexjlockwood/gcm"
+import "github.com/johngb/gcm"
 ```
 
 Sample Usage
@@ -32,7 +34,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/alexjlockwood/gcm"
+	"github.com/johngb/gcm"
 )
 
 func main() {
@@ -45,8 +47,17 @@ func main() {
 	sender := &gcm.Sender{ApiKey: "sample_api_key"}
 
 	// Send the message and receive the response after at most two retries.
-	response, err := sender.Send(msg, 2)
-	if err != nil {
+	response, httpErr := sender.Send(msg, 2)
+	if httpErr.Err != nil {
+		switch httpErr.StatusCode{
+		case http.StatusBadRequest:
+			...
+			// handle bad requests as needed
+		case http.StatusInternalServerError
+			...
+			// handle internal server errors as needed, keeping to the httpErr.RetryAfter if you retry
+		...
+		}
 		fmt.Println("Failed to send message:", err)
 		return
 	}
@@ -67,7 +78,7 @@ import (
 	"appengine"
 	"appengine/urlfetch"
 
-	"github.com/alexjlockwood/gcm"
+	"github.com/johngb/gcm"
 )
 
 func handler(w http.ResponseWriter, r *http.Request) {
