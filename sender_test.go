@@ -105,7 +105,7 @@ func TestSendNoRetrySuccess(t *testing.T) {
 	server := startTestServer(t, &testResponse{Response: &Response{}})
 	defer server.Close()
 	sender := &Sender{APIKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
+	msg := NewMessage(`{"key": "value"}`, "1")
 	if _, err := sender.SendNoRetry(msg); err.Err != nil {
 		t.Fatalf("test failed with error: %s", err.Err)
 	}
@@ -115,7 +115,7 @@ func TestSendNoRetryNonrecoverableFailure(t *testing.T) {
 	server := startTestServer(t, &testResponse{StatusCode: http.StatusBadRequest})
 	defer server.Close()
 	sender := &Sender{APIKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
+	msg := NewMessage(`{"key": "value"}`, "1")
 	if _, err := sender.SendNoRetry(msg); err == nil {
 		t.Fatal("test expected non-recoverable error")
 	}
@@ -128,7 +128,7 @@ func TestSendOneRetrySuccess(t *testing.T) {
 	)
 	defer server.Close()
 	sender := &Sender{APIKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
+	msg := NewMessage(`{"key": "value"}`, "1")
 	if _, err := sender.Send(msg, 1); err.Err != nil {
 		t.Fatal("send should succeed after one retry")
 	}
@@ -141,7 +141,7 @@ func TestSendOneRetryFailure(t *testing.T) {
 	)
 	defer server.Close()
 	sender := &Sender{APIKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
+	msg := NewMessage(`{"key": "value"}`, "1")
 	resp, err := sender.Send(msg, 1)
 	if err.Err != nil || resp.Failure != 1 {
 		t.Fatal("send should return response with one failure")
@@ -155,7 +155,7 @@ func TestSendOneRetryNonrecoverableFailure(t *testing.T) {
 	)
 	defer server.Close()
 	sender := &Sender{APIKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
+	msg := NewMessage(`{"key": "value"}`, "1")
 	if _, err := sender.Send(msg, 1); err == nil {
 		t.Fatal("send should fail after one retry")
 	}
