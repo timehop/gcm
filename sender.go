@@ -91,6 +91,8 @@ func (s *Sender) SendNoRetry(msg *Message) (*Response, *HTTPError) {
 		return nil, &HTTPError{Err: err}
 	}
 
+	fmt.Printf("\nmsg: %+v\n", msg)
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return nil, &HTTPError{Err: err}
@@ -103,7 +105,21 @@ func (s *Sender) SendNoRetry(msg *Message) (*Response, *HTTPError) {
 	req.Header.Add("Authorization", fmt.Sprintf("key=%s", s.APIKey))
 	req.Header.Add("Content-Type", "application/json")
 
+	fmt.Printf("\nreq.Body: %s\n", req.Body)
+
 	resp, err := s.HTTP.Do(req)
+
+	///-----------------------
+
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(resp.Body)
+	str := buf.String() // Does a complete copy of the bytes in the buffer.
+
+	fmt.Printf("\nresp.Body: %+v\n", str)
+	fmt.Printf("\nerr: %+v\n", err)
+
+	///-------------------------
+
 	defer resp.Body.Close()
 	if err != nil {
 		return nil, &HTTPError{Err: err}
