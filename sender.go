@@ -7,41 +7,44 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"time"
 )
 
 const (
 	// GcmSendEndpoint is the endpoint for sending messages to the GCM server.
 	GcmSendEndpoint = "https://android.googleapis.com/gcm/send"
-	// Initial delay before first retry, without jitter.
-	backoffInitialDelay = 1000
-	// Maximum delay before a retry.
+	// Initial delay (ms) before first retry, without jitter.
+	initialBackoffDelay = 1000
+	// Maximum delay (ms) before a retry.
 	maxBackoffDelay = 1024000
+	// Percentage jitter to use when retrying.  Jitter is a random variation in
+	// timing to prevent many retries from hitting the server simulatenously.
+	// Recommended values are between 0 and 50
+	jitterPercentage = 50
 )
 
 // Declared as a mutable variable for testing purposes.
 var gcmSendEndpoint = GcmSendEndpoint
 
-// Errors
-type JSONParseError struct{ error }
-type UnauthorizedError struct{ error }
-type UnknownError struct{ error }
-
+// GCM response types
 const (
-	ResponseErrorMissingRegistration = "MissingRegistration"
-	ResponseErrorInvalidRegistration = "InvalidRegistration"
-	ResponseErrorMismatchSenderID    = "MismatchSenderId"
-	ResponseErrorNotRegistered       = "NotRegistered"
-	ResponseErrorMessageTooBig       = "MessageTooBig"
-	ResponseErrorInvalidDataKey      = "InvalidDataKey"
-	ResponseErrorInvalidTTL          = "InvalidTtl"
-	ResponseErrorUnavailable         = "Unavailable"
-	ResponseErrorInternalServerError = "InternalServerError"
-	ResponseErrorInvalidPackageName  = "InvalidPackageName"
+	ResponseErrorMissingRegistration       = "MissingRegistration"
+	ResponseErrorInvalidRegistration       = "InvalidRegistration"
+	ResponseErrorMismatchSenderID          = "MismatchSenderId"
+	ResponseErrorNotRegistered             = "NotRegistered"
+	ResponseErrorMessageTooBig             = "MessageTooBig"
+	ResponseErrorInvalidDataKey            = "InvalidDataKey"
+	ResponseErrorInvalidTTL                = "InvalidTtl"
+	ResponseErrorUnavailable               = "Unavailable"
+	ResponseErrorInternalServerError       = "InternalServerError"
+	ResponseErrorInvalidPackageName        = "InvalidPackageName"
+	ResponseErrorDeviceMessageRateExceeded = "DeviceMessageRateExceeded"
 )
+
+const ()
 
 // Sender abstracts the interaction between the application server and the
 // GCM server. The developer must obtain an API key from the Google APIs
@@ -49,7 +52,7 @@ const (
 // requests on the application server's behalf. To send a message to one or
 // more devices use the Sender's Send or SendNoRetry methods.
 //
-// If the Http field is nil, a zeroed http.Client will be allocated and used
+// If the HTTP field is nil, a zeroed http.Client will be allocated and used
 // to send messages. If your application server runs on Google AppEngine,
 // you must use the "appengine/urlfetch" package to create the *http.Client
 // as follows:
@@ -57,61 +60,89 @@ const (
 //	func handler(w http.ResponseWriter, r *http.Request) {
 //		c := appengine.NewContext(r)
 //		client := urlfetch.Client(c)
-//		sender := &gcm.Sender{ApiKey: key, Http: client}
+//		sender := &gcm.Sender{APIKey: key, HTTP: client}
 //
 //		/* ... */
 //	}
 type Sender struct {
-	ApiKey string
-	Http   *http.Client
+	APIKey string
+	HTTP   *http.Client
+}
+
+// HTTPError is a custom error type to handle returning errors with GCM
+// http response codes
+type HTTPError struct {
+	StatusCode int
+	Err        error
+	RetryAfter int
+}
+
+func (r *HTTPError) Error() string {
+	return fmt.Sprintf("%d error: %s\nretry-after: %d", r.StatusCode, r.Err, r.RetryAfter)
 }
 
 // SendNoRetry sends a message to the GCM server without retrying in case of
 // service unavailability. A non-nil error is returned if a non-recoverable
 // error occurs (i.e. if the response status is not "200 OK").
-func (s *Sender) SendNoRetry(msg *Message) (*Response, error) {
+func (s *Sender) SendNoRetry(msg *Message) (*Response, *HTTPError) {
 	if err := checkSender(s); err != nil {
-		return nil, err
+		return nil, &HTTPError{Err: err}
 	} else if err := checkMessage(msg); err != nil {
-		return nil, err
+		return nil, &HTTPError{Err: err}
 	}
 
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return nil, err
+		return nil, &HTTPError{Err: err}
 	}
+
+	// fmt.Printf("\ndata: %+v\n", string(data))
 
 	req, err := http.NewRequest("POST", gcmSendEndpoint, bytes.NewBuffer(data))
 	if err != nil {
-		return nil, err
+		return nil, &HTTPError{Err: err}
 	}
-	req.Header.Add("Authorization", fmt.Sprintf("key=%s", s.ApiKey))
+	req.Header.Add("Authorization", fmt.Sprintf("key=%s", s.APIKey))
 	req.Header.Add("Content-Type", "application/json")
 
-	resp, err := s.Http.Do(req)
-	if err != nil {
-		return nil, err
-	}
+	// // print request
+	// reqStr, _ := httputil.DumpRequest(req, true)
+	// fmt.Println("req: ", string(reqStr))
+
+	resp, err := s.HTTP.Do(req)
 	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusBadRequest:
-		return nil, JSONParseError{fmt.Errorf("%d error: %s", resp.StatusCode, resp.Status)}
-	case http.StatusUnauthorized:
-		return nil, UnauthorizedError{fmt.Errorf("%d error: %s", resp.StatusCode, resp.Status)}
-	case http.StatusOK:
-	default:
-		return nil, UnknownError{fmt.Errorf("%d error: %s", resp.StatusCode, resp.Status)}
-	}
-
-	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, &HTTPError{Err: err}
 	}
 
+	// // print response
+	// respStr, _ := httputil.DumpResponse(resp, true)
+	// fmt.Println("resp: ", string(respStr))
+
+	// if the status is not StatusOK, return with the error
+	if resp.StatusCode != http.StatusOK {
+		delta, err := parseRetryAfter(resp.Header.Get("Retry-After"))
+		if err != nil {
+			return nil, &HTTPError{
+				StatusCode: resp.StatusCode,
+				Err:        errors.New(resp.Status),
+			}
+		}
+		return nil, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Err:        errors.New(resp.Status),
+			RetryAfter: delta,
+		}
+	}
+
+	// get the body and decode
 	response := new(Response)
-	err = json.Unmarshal(body, response)
-	return response, err
+	err = json.NewDecoder(resp.Body).Decode(response)
+	if err != nil {
+		return response, &HTTPError{Err: err}
+	}
+	// success response
+	return response, &HTTPError{StatusCode: http.StatusOK}
 }
 
 // Send sends a message to the GCM server, retrying in case of service
@@ -120,34 +151,36 @@ func (s *Sender) SendNoRetry(msg *Message) (*Response, error) {
 //
 // Note that messages are retried using exponential backoff, and as a
 // result, this method may block for several seconds.
-func (s *Sender) Send(msg *Message, retries int) (*Response, error) {
-	if err := checkSender(s); err != nil {
-		return nil, err
-	} else if err := checkMessage(msg); err != nil {
-		return nil, err
-	} else if retries < 0 {
-		return nil, errors.New("'retries' must not be negative.")
+func (s *Sender) Send(msg *Message, retries int) (*Response, *HTTPError) {
+	if retries < 0 {
+		return nil, &HTTPError{Err: fmt.Errorf("'retries' must be positive")}
 	}
 
 	// Send the message for the first time.
-	resp, err := s.SendNoRetry(msg)
-	if err != nil {
-		return nil, err
-	} else if resp.Failure == 0 || retries == 0 {
-		return resp, nil
+	resp, httpErr := s.SendNoRetry(msg)
+	if httpErr.Err != nil {
+		return nil, httpErr
+	}
+
+	// if there were no errors, or retries = 0, return the result
+	if resp.Failure == 0 || retries == 0 {
+		return resp, httpErr // err should always be nil here
 	}
 
 	// One or more messages failed to send.
-	regIDs := msg.RegistrationIDs
+	regIDs := msg.RegistrationIDs // store the original RegistrationIDs
+	// TODO: Don't modify the msg object via the pointer, as we may have
+	// multiple goroutines acting on it at once
 	allResults := make(map[string]Result, len(regIDs))
-	backoff := backoffInitialDelay
+	backoff := initialBackoffDelay
 	for i := 0; updateStatus(msg, resp, allResults) > 0 && i < retries; i++ {
-		sleepTime := backoff/2 + rand.Intn(backoff)
+		sleepTime := calculateSleep(backoff)
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 		backoff = min(2*backoff, maxBackoffDelay)
-		if resp, err = s.SendNoRetry(msg); err != nil {
+		if resp, httpErr = s.SendNoRetry(msg); httpErr.Err != nil {
+			// set registration ids back to their original values
 			msg.RegistrationIDs = regIDs
-			return nil, err
+			return nil, httpErr
 		}
 	}
 
@@ -177,7 +210,34 @@ func (s *Sender) Send(msg *Message, retries int) (*Response, error) {
 		Failure:      failure,
 		CanonicalIDs: canonicalIDs,
 		Results:      finalResults,
-	}, nil
+	}, httpErr
+}
+
+// parseRetryAfter attempts to parse the contents of the Retry-After http
+// header.  It returns the time in seconds if successful, and an error for
+// either an unparseable value or a nil value.
+func parseRetryAfter(r string) (int, error) {
+	// if not set
+	if r == "" {
+		return 0, fmt.Errorf("Empty Retry-After header")
+	}
+
+	// if set as an integer delta (assumed to be in seconds)
+	if delta, err := strconv.Atoi(r); err == nil {
+		return max(delta, 0), err
+	}
+
+	// if set as a date, convert to a time in seconds
+	if ra, err := time.Parse(time.RFC1123, r); err == nil {
+		delta := (ra.UnixNano() - time.Now().UnixNano()) / 1e9
+		return int(delta), err
+	}
+	fmt.Printf("#936r Unparseable 'Retry-After' header: %s", r)
+	return 0, fmt.Errorf("Unparseable 'Retry-After' header: %s", r)
+}
+
+func calculateSleep(backoff int) int {
+	return (backoff*(100-jitterPercentage))/100 + rand.Intn((2*backoff*jitterPercentage)/100)
 }
 
 // updateStatus updates the status of the messages sent to devices and
@@ -199,7 +259,15 @@ func updateStatus(msg *Message, resp *Response, allResults map[string]Result) in
 // about why this wasn't included in the "math" package, see this thread:
 // https://groups.google.com/d/topic/golang-nuts/dbyqx_LGUxM/discussion
 func min(a, b int) int {
-	if a < b {
+	if a <= b {
+		return a
+	}
+	return b
+}
+
+// max returns the larger of two integers.
+func max(a, b int) int {
+	if a >= b {
 		return a
 	}
 	return b
@@ -208,11 +276,11 @@ func min(a, b int) int {
 // checkSender returns an error if the sender is not well-formed and
 // initializes a zeroed http.Client if one has not been provided.
 func checkSender(sender *Sender) error {
-	if sender.ApiKey == "" {
-		return errors.New("the sender's API key must not be empty")
+	if sender.APIKey == "" {
+		return errors.New("The sender's API key must not be empty")
 	}
-	if sender.Http == nil {
-		sender.Http = new(http.Client)
+	if sender.HTTP == nil {
+		sender.HTTP = new(http.Client)
 	}
 	return nil
 }
