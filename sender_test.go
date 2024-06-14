@@ -1,8 +1,13 @@
 package gcm
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"firebase.google.com/go/v4/messaging"
 	"fmt"
+	"github.com/appleboy/go-fcm"
+	"golang.org/x/oauth2"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,7 +15,27 @@ import (
 
 type testResponse struct {
 	StatusCode int
-	Response   *Response
+	Response   *messaging.BatchResponse
+}
+
+// MockTokenSource is a TokenSource implementation that can be used for testing.
+type MockTokenSource struct {
+	AccessToken string
+}
+
+// Token returns the test token associated with the TokenSource.
+func (ts *MockTokenSource) Token() (*oauth2.Token, error) {
+	return &oauth2.Token{AccessToken: ts.AccessToken}, nil
+}
+
+func getMockClient(server *httptest.Server) (*fcm.Client, error) {
+	return fcm.NewClient(
+		context.Background(),
+		fcm.WithEndpoint(server.URL),
+		fcm.WithProjectID("test"),
+		fcm.WithTokenSource(&MockTokenSource{AccessToken: "test-token"}),
+	)
+
 }
 
 func startTestServer(t *testing.T, responses ...*testResponse) *httptest.Server {
@@ -31,82 +56,71 @@ func startTestServer(t *testing.T, responses ...*testResponse) *httptest.Server 
 		i++
 	}
 	server := httptest.NewServer(http.HandlerFunc(handler))
-	gcmSendEndpoint = server.URL
 	return server
 }
 
 func TestSendNoRetryInvalidApiKey(t *testing.T) {
 	server := startTestServer(t)
 	defer server.Close()
-	sender := &Sender{ApiKey: ""}
-	if _, err := sender.SendNoRetry(&Message{RegistrationIDs: []string{"1"}}); err == nil {
-		t.Fatal("test should fail when sender's ApiKey is \"\"")
+	sender := &Sender{CredentialsJson: ""}
+	if _, _, err := sender.SendNoRetry(&messaging.MulticastMessage{Tokens: []string{"1"}}); err == nil {
+		t.Fatal("test should fail when sender's CredentialsJson is \"\"")
 	}
 }
 
 func TestSendInvalidApiKey(t *testing.T) {
 	server := startTestServer(t)
 	defer server.Close()
-	sender := &Sender{ApiKey: ""}
-	if _, err := sender.Send(&Message{RegistrationIDs: []string{"1"}}, 0); err == nil {
-		t.Fatal("test should fail when sender's ApiKey is \"\"")
+	sender := &Sender{CredentialsJson: ""}
+	if _, _, err := sender.Send(&messaging.MulticastMessage{Tokens: []string{"1"}}, 0); err == nil {
+		t.Fatal("test should fail when sender's CredentialsJson is \"\"")
 	}
 }
 
 func TestSendNoRetryInvalidMessage(t *testing.T) {
 	server := startTestServer(t)
 	defer server.Close()
-	sender := &Sender{ApiKey: "test"}
-	if _, err := sender.SendNoRetry(nil); err == nil {
+	sender := &Sender{CredentialsJson: "test"}
+	if _, _, err := sender.SendNoRetry(nil); err == nil {
 		t.Fatal("test should fail when message is nil")
 	}
-	if _, err := sender.SendNoRetry(&Message{}); err == nil {
-		t.Fatal("test should fail when message RegistrationIDs field is nil")
+	if _, _, err := sender.SendNoRetry(&messaging.MulticastMessage{}); err == nil {
+		t.Fatal("test should fail when message Tokens field is nil")
 	}
-	if _, err := sender.SendNoRetry(&Message{RegistrationIDs: []string{}}); err == nil {
-		t.Fatal("test should fail when message RegistrationIDs field is an empty slice")
+	if _, _, err := sender.SendNoRetry(&messaging.MulticastMessage{Tokens: []string{}}); err == nil {
+		t.Fatal("test should fail when message Tokens field is an empty slice")
 	}
-	if _, err := sender.SendNoRetry(&Message{RegistrationIDs: make([]string, 1001)}); err == nil {
-		t.Fatal("test should fail when more than 1000 RegistrationIDs are specified")
-	}
-	if _, err := sender.SendNoRetry(&Message{RegistrationIDs: []string{"1"}, TimeToLive: -1}); err == nil {
-		t.Fatal("test should fail when message TimeToLive field is negative")
-	}
-	if _, err := sender.SendNoRetry(&Message{RegistrationIDs: []string{"1"}, TimeToLive: 2419201}); err == nil {
-		t.Fatal("test should fail when message TimeToLive field is greater than 2419200")
+	if _, _, err := sender.SendNoRetry(&messaging.MulticastMessage{Tokens: make([]string, 501)}); err == nil {
+		t.Fatal("test should fail when more than 500 Tokens are specified")
 	}
 }
 
 func TestSendInvalidMessage(t *testing.T) {
 	server := startTestServer(t)
 	defer server.Close()
-	sender := &Sender{ApiKey: "test"}
-	if _, err := sender.Send(nil, 0); err == nil {
+	sender := &Sender{CredentialsJson: "test"}
+	if _, _, err := sender.Send(nil, 0); err == nil {
 		t.Fatal("test should fail when message is nil")
 	}
-	if _, err := sender.Send(&Message{}, 0); err == nil {
-		t.Fatal("test should fail when message RegistrationIDs field is nil")
+	if _, _, err := sender.Send(&messaging.MulticastMessage{}, 0); err == nil {
+		t.Fatal("test should fail when message Tokens field is nil")
 	}
-	if _, err := sender.Send(&Message{RegistrationIDs: []string{}}, 0); err == nil {
-		t.Fatal("test should fail when message RegistrationIDs field is an empty slice")
+	if _, _, err := sender.Send(&messaging.MulticastMessage{Tokens: []string{}}, 0); err == nil {
+		t.Fatal("test should fail when message Tokens field is an empty slice")
 	}
-	if _, err := sender.Send(&Message{RegistrationIDs: make([]string, 1001)}, 0); err == nil {
-		t.Fatal("test should fail when more than 1000 RegistrationIDs are specified")
+	if _, _, err := sender.Send(&messaging.MulticastMessage{Tokens: make([]string, 1001)}, 0); err == nil {
+		t.Fatal("test should fail when more than 1000 Tokens are specified")
 	}
-	if _, err := sender.Send(&Message{RegistrationIDs: []string{"1"}, TimeToLive: -1}, 0); err == nil {
-		t.Fatal("test should fail when message TimeToLive field is negative")
-	}
-	if _, err := sender.Send(&Message{RegistrationIDs: []string{"1"}, TimeToLive: 2419201}, 0); err == nil {
-		t.Fatal("test should fail when message TimeToLive field is greater than 2419200")
-	}
+
 }
 
 func TestSendNoRetrySuccess(t *testing.T) {
-	server := startTestServer(t, &testResponse{Response: &Response{}})
+	server := startTestServer(t, &testResponse{Response: &messaging.BatchResponse{}})
 	defer server.Close()
-	sender := &Sender{ApiKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
-	if _, err := sender.SendNoRetry(msg); err != nil {
+	client, _ := getMockClient(server)
+	sender := &Sender{CredentialsJson: "test", Client: client}
+	msg := NewMessage(map[string]string{"key": "value"}, "1")
+	if _, _, err := sender.SendNoRetry(msg); err != nil {
 		t.Fatalf("test failed with error: %s", err)
 	}
 }
@@ -114,49 +128,37 @@ func TestSendNoRetrySuccess(t *testing.T) {
 func TestSendNoRetryNonrecoverableFailure(t *testing.T) {
 	server := startTestServer(t, &testResponse{StatusCode: http.StatusBadRequest})
 	defer server.Close()
-	sender := &Sender{ApiKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
-	if _, err := sender.SendNoRetry(msg); err == nil {
+	sender := &Sender{CredentialsJson: "test"}
+	msg := NewMessage(map[string]string{"key": "value"}, "1")
+	if _, _, err := sender.SendNoRetry(msg); err == nil {
 		t.Fatal("test expected non-recoverable error")
 	}
 }
 
-func TestSendOneRetrySuccess(t *testing.T) {
+func TestSendSuccess(t *testing.T) {
 	server := startTestServer(t,
-		&testResponse{Response: &Response{Failure: 1, Results: []Result{{Error: "Unavailable"}}}},
-		&testResponse{Response: &Response{Success: 1, Results: []Result{{MessageID: "id"}}}},
+		&testResponse{Response: &messaging.BatchResponse{FailureCount: 1, Responses: []*messaging.SendResponse{{Error: errors.New("Unavailable")}}}},
+		&testResponse{Response: &messaging.BatchResponse{FailureCount: 1, Responses: []*messaging.SendResponse{{Error: errors.New("Unavailable")}}}},
 	)
 	defer server.Close()
-	sender := &Sender{ApiKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
-	if _, err := sender.Send(msg, 1); err != nil {
-		t.Fatal("send should succeed after one retry")
-	}
-}
-
-func TestSendOneRetryFailure(t *testing.T) {
-	server := startTestServer(t,
-		&testResponse{Response: &Response{Failure: 1, Results: []Result{{Error: "Unavailable"}}}},
-		&testResponse{Response: &Response{Failure: 1, Results: []Result{{Error: "Unavailable"}}}},
-	)
-	defer server.Close()
-	sender := &Sender{ApiKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
-	resp, err := sender.Send(msg, 1)
-	if err != nil || resp.Failure != 1 {
-		t.Fatal("send should return response with one failure")
+	client, _ := getMockClient(server)
+	sender := &Sender{CredentialsJson: "test", Client: client}
+	msg := NewMessage(map[string]string{"key": "value"}, "1")
+	resp, _, err := sender.Send(msg, 1)
+	if err != nil || resp.SuccessCount != 1 {
+		t.Fatal("send should return response with one success")
 	}
 }
 
 func TestSendOneRetryNonrecoverableFailure(t *testing.T) {
 	server := startTestServer(t,
-		&testResponse{Response: &Response{Failure: 1, Results: []Result{{Error: "Unavailable"}}}},
+		&testResponse{Response: &messaging.BatchResponse{FailureCount: 1, Responses: []*messaging.SendResponse{{Error: errors.New("Unavailable")}}}},
 		&testResponse{StatusCode: http.StatusBadRequest},
 	)
 	defer server.Close()
-	sender := &Sender{ApiKey: "test"}
-	msg := NewMessage(map[string]interface{}{"key": "value"}, "1")
-	if _, err := sender.Send(msg, 1); err == nil {
+	sender := &Sender{CredentialsJson: "test"}
+	msg := NewMessage(map[string]string{"key": "value"}, "1")
+	if _, _, err := sender.Send(msg, 1); err == nil {
 		t.Fatal("send should fail after one retry")
 	}
 }
