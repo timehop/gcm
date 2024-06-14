@@ -1,29 +1,39 @@
-// Google Cloud Messaging for application servers implemented using the
-// Go programming language.
 package gcm
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
-	"fmt"
-	"io/ioutil"
+	"firebase.google.com/go/v4/messaging"
+	"github.com/appleboy/go-fcm"
 	"math/rand"
-	"net/http"
 	"time"
 )
 
 const (
-	// GcmSendEndpoint is the endpoint for sending messages to the GCM server.
-	GcmSendEndpoint = "https://android.googleapis.com/gcm/send"
 	// Initial delay before first retry, without jitter.
 	backoffInitialDelay = 1000
 	// Maximum delay before a retry.
 	maxBackoffDelay = 1024000
 )
 
-// Declared as a mutable variable for testing purposes.
-var gcmSendEndpoint = GcmSendEndpoint
+// Errors
+
+type JSONParseError struct{ error }
+type UnauthorizedError struct{ error }
+type UnknownError struct{ error }
+
+const (
+	ResponseErrorMissingRegistration = "MissingRegistration"
+	ResponseErrorInvalidRegistration = "InvalidRegistration"
+	ResponseErrorMismatchSenderID    = "MismatchSenderId"
+	ResponseErrorNotRegistered       = "NotRegistered"
+	ResponseErrorMessageTooBig       = "MessageTooBig"
+	ResponseErrorInvalidDataKey      = "InvalidDataKey"
+	ResponseErrorInvalidTTL          = "InvalidTtl"
+	ResponseErrorUnavailable         = "Unavailable"
+	ResponseErrorInternalServerError = "InternalServerError"
+	ResponseErrorInvalidPackageName  = "InvalidPackageName"
+)
 
 // Sender abstracts the interaction between the application server and the
 // GCM server. The developer must obtain an API key from the Google APIs
@@ -31,63 +41,44 @@ var gcmSendEndpoint = GcmSendEndpoint
 // requests on the application server's behalf. To send a message to one or
 // more devices use the Sender's Send or SendNoRetry methods.
 //
-// If the Http field is nil, a zeroed http.Client will be allocated and used
-// to send messages. If your application server runs on Google AppEngine,
-// you must use the "appengine/urlfetch" package to create the *http.Client
-// as follows:
+// If Sender Client is nil, checkSender will automatically initialize a Client
 //
 //	func handler(w http.ResponseWriter, r *http.Request) {
 //		c := appengine.NewContext(r)
-//		client := urlfetch.Client(c)
-//		sender := &gcm.Sender{ApiKey: key, Http: client}
+//		sender := &gcm.Sender{CredentialsJson: key}
 //
 //		/* ... */
 //	}
 type Sender struct {
-	ApiKey string
-	Http   *http.Client
+	CredentialsJson string
+	Client          *fcm.Client
 }
 
-// SendNoRetry sends a message to the GCM server without retrying in case of
+// SendNoRetry sends a message to the FCM server without retrying in case of
 // service unavailability. A non-nil error is returned if a non-recoverable
-// error occurs (i.e. if the response status is not "200 OK").
-func (s *Sender) SendNoRetry(msg *Message) (*Response, error) {
-	if err := checkSender(s); err != nil {
-		return nil, err
-	} else if err := checkMessage(msg); err != nil {
-		return nil, err
+// error occurs.
+// If msg is a valid MulticastMessage, then the failed tokens will also be returned.
+func (s *Sender) SendNoRetry(msg *messaging.MulticastMessage) (*messaging.BatchResponse, []string, error) {
+	// Note that failed tokens returns as nil, since we cannot guarantee that msg.Tokens exists
+	if err := checkMessage(msg); err != nil {
+		return nil, nil, err
+	} else if err = checkSender(s); err != nil {
+		return nil, msg.Tokens, err
 	}
-
-	data, err := json.Marshal(msg)
+	resp, err := s.Client.SendMulticast(context.Background(), msg)
 	if err != nil {
-		return nil, err
+		return resp, msg.Tokens, err
 	}
 
-	req, err := http.NewRequest("POST", gcmSendEndpoint, bytes.NewBuffer(data))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Add("Authorization", fmt.Sprintf("key=%s", s.ApiKey))
-	req.Header.Add("Content-Type", "application/json")
-
-	resp, err := s.Http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%d error: %s", resp.StatusCode, resp.Status)
+	// Collect failed tokens
+	var failedTokens []string
+	for idx, r := range resp.Responses {
+		if !r.Success {
+			failedTokens = append(failedTokens, msg.Tokens[idx])
+		}
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	response := new(Response)
-	err = json.Unmarshal(body, response)
-	return response, err
+	return resp, failedTokens, nil
 }
 
 // Send sends a message to the GCM server, retrying in case of service
@@ -96,116 +87,122 @@ func (s *Sender) SendNoRetry(msg *Message) (*Response, error) {
 //
 // Note that messages are retried using exponential backoff, and as a
 // result, this method may block for several seconds.
-func (s *Sender) Send(msg *Message, retries int) (*Response, error) {
-	if err := checkSender(s); err != nil {
-		return nil, err
-	} else if err := checkMessage(msg); err != nil {
-		return nil, err
+func (s *Sender) Send(msg *messaging.MulticastMessage, retries int) (*messaging.BatchResponse, []string, error) {
+	// Note that failed tokens returns as nil, since we cannot guarantee that msg.Tokens exists
+	if err := checkMessage(msg); err != nil {
+		return nil, nil, err
+	} else if err = checkSender(s); err != nil {
+		return nil, msg.Tokens, err
 	} else if retries < 0 {
-		return nil, errors.New("'retries' must not be negative.")
+		return nil, msg.Tokens, errors.New("retries must not be negative")
 	}
 
 	// Send the message for the first time.
-	resp, err := s.SendNoRetry(msg)
+	resp, failedTokens, err := s.SendNoRetry(msg)
 	if err != nil {
-		return nil, err
-	} else if resp.Failure == 0 || retries == 0 {
-		return resp, nil
+		return nil, failedTokens, err
+	} else if resp.FailureCount == 0 || retries == 0 {
+		return resp, failedTokens, nil
 	}
 
 	// One or more messages failed to send.
-	regIDs := msg.RegistrationIDs
-	allResults := make(map[string]Result, len(regIDs))
+	regIDs := msg.Tokens
+	allResults := make(map[string]*messaging.SendResponse, len(regIDs))
 	backoff := backoffInitialDelay
 	for i := 0; updateStatus(msg, resp, allResults) > 0 && i < retries; i++ {
 		sleepTime := backoff/2 + rand.Intn(backoff)
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 		backoff = min(2*backoff, maxBackoffDelay)
-		if resp, err = s.SendNoRetry(msg); err != nil {
-			msg.RegistrationIDs = regIDs
-			return nil, err
+		if resp, failedTokens, err = s.SendNoRetry(msg); err != nil {
+			msg.Tokens = regIDs
+			return nil, failedTokens, err
 		}
 	}
 
-	// Bring the message back to its original state.
-	msg.RegistrationIDs = regIDs
+	// Restore the original list of registration tokens.
+	msg.Tokens = regIDs
 
-	// Create a Response containing the overall results.
-	finalResults := make([]Result, len(regIDs))
-	var success, failure, canonicalIDs int
-	for i := 0; i < len(regIDs); i++ {
-		result, _ := allResults[regIDs[i]]
-		finalResults[i] = result
-		if result.MessageID != "" {
-			if result.RegistrationID != "" {
-				canonicalIDs++
-			}
-			success++
+	// Create a final BatchResponse and list of failed tokens.
+	finalResponses := make([]*messaging.SendResponse, len(regIDs))
+	for i, token := range regIDs {
+		if result, ok := allResults[token]; ok {
+			finalResponses[i] = result
 		} else {
-			failure++
+			finalResponses[i] = &messaging.SendResponse{
+				Success: false,
+				Error:   errors.New("unknown error"),
+			}
 		}
 	}
 
-	return &Response{
-		// Return the most recent multicast id.
-		MulticastID:  resp.MulticastID,
-		Success:      success,
-		Failure:      failure,
-		CanonicalIDs: canonicalIDs,
-		Results:      finalResults,
-	}, nil
+	finalBatchResponse := &messaging.BatchResponse{
+		SuccessCount: resp.SuccessCount,
+		FailureCount: resp.FailureCount,
+		Responses:    finalResponses,
+	}
+
+	return finalBatchResponse, failedTokens, nil
 }
 
 // updateStatus updates the status of the messages sent to devices and
 // returns the number of recoverable errors that could be retried.
-func updateStatus(msg *Message, resp *Response, allResults map[string]Result) int {
-	unsentRegIDs := make([]string, 0, resp.Failure)
-	for i := 0; i < len(resp.Results); i++ {
-		regID := msg.RegistrationIDs[i]
-		allResults[regID] = resp.Results[i]
-		if resp.Results[i].Error == "Unavailable" {
+func updateStatus(msg *messaging.MulticastMessage, resp *messaging.BatchResponse, allResults map[string]*messaging.SendResponse) int {
+	unsentRegIDs := make([]string, 0, resp.FailureCount)
+	for i := 0; i < len(resp.Responses); i++ {
+		regID := msg.Tokens[i]
+		allResults[regID] = resp.Responses[i]
+		if resp.Responses[i].Error != nil && isRecoverableError(resp.Responses[i].Error) {
 			unsentRegIDs = append(unsentRegIDs, regID)
 		}
 	}
-	msg.RegistrationIDs = unsentRegIDs
+	msg.Tokens = unsentRegIDs
 	return len(unsentRegIDs)
 }
 
-// min returns the smaller of two integers. For exciting religious wars
-// about why this wasn't included in the "math" package, see this thread:
-// https://groups.google.com/d/topic/golang-nuts/dbyqx_LGUxM/discussion
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+// isRecoverableError checks if the error is a recoverable error.
+// This is under the assumption that Legacy and HTTP V1 + SDK return
+// the same errors.
+// For more info, check out:
+// https://firebase.google.com/docs/cloud-messaging/send-message#rest
+func isRecoverableError(err error) bool {
+	return err.Error() == "Unavailable"
 }
 
 // checkSender returns an error if the sender is not well-formed and
-// initializes a zeroed http.Client if one has not been provided.
+// initializes a zeroed fcm.Client if one has not been provided.
 func checkSender(sender *Sender) error {
-	if sender.ApiKey == "" {
-		return errors.New("the sender's API key must not be empty")
+	if sender.CredentialsJson == "" {
+		return errors.New("the sender's credentials data must not be empty")
 	}
-	if sender.Http == nil {
-		sender.Http = new(http.Client)
+	if sender.Client == nil {
+		client, err := initFCMClient(sender)
+		if err != nil {
+			return err
+		}
+		sender.Client = client
 	}
 	return nil
 }
 
+func initFCMClient(sender *Sender) (*fcm.Client, error) {
+	ctx := context.Background()
+	client, err := fcm.NewClient(
+		ctx,
+		fcm.WithCredentialsJSON([]byte(sender.CredentialsJson)),
+	)
+	return client, err
+}
+
 // checkMessage returns an error if the message is not well-formed.
-func checkMessage(msg *Message) error {
+func checkMessage(msg *messaging.MulticastMessage) error {
 	if msg == nil {
 		return errors.New("the message must not be nil")
-	} else if msg.RegistrationIDs == nil {
-		return errors.New("the message's RegistrationIDs field must not be nil")
-	} else if len(msg.RegistrationIDs) == 0 {
-		return errors.New("the message must specify at least one registration ID")
-	} else if len(msg.RegistrationIDs) > 1000 {
-		return errors.New("the message may specify at most 1000 registration IDs")
-	} else if msg.TimeToLive < 0 || 2419200 < msg.TimeToLive {
-		return errors.New("the message's TimeToLive field must be an integer " +
-			"between 0 and 2419200 (4 weeks)")
+	} else if msg.Tokens == nil {
+		return errors.New("the message's Tokens field must not be nil")
+	} else if len(msg.Tokens) == 0 {
+		return errors.New("the message must specify at least one Token")
+	} else if len(msg.Tokens) > 500 {
+		return errors.New("the message may specify at most 500 registration IDs")
 	}
 	return nil
 }
