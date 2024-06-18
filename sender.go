@@ -160,12 +160,8 @@ func updateStatus(msg *messaging.MulticastMessage, resp *messaging.BatchResponse
 }
 
 // isRecoverableError checks if the error is a recoverable error.
-// This is under the assumption that Legacy and HTTP V1 + SDK return
-// the same errors.
-// For more info, check out:
-// https://firebase.google.com/docs/cloud-messaging/send-message#rest
 func isRecoverableError(err error) bool {
-	return err.Error() == "Unavailable"
+	return messaging.IsUnavailable(err)
 }
 
 // checkSender returns an error if the sender is not well-formed and
