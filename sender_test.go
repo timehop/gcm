@@ -119,7 +119,7 @@ func TestSendNoRetrySuccess(t *testing.T) {
 	defer server.Close()
 	client, _ := getMockClient(server)
 	sender := &Sender{CredentialsJson: "test", Client: client}
-	msg := NewMessage(map[string]string{"key": "value"}, "1")
+	msg := NewMessage(map[string]string{"key": "value"}, nil, "1")
 	if _, _, err := sender.SendNoRetry(msg); err != nil {
 		t.Fatalf("test failed with error: %s", err)
 	}
@@ -129,7 +129,7 @@ func TestSendNoRetryNonrecoverableFailure(t *testing.T) {
 	server := startTestServer(t, &testResponse{StatusCode: http.StatusBadRequest})
 	defer server.Close()
 	sender := &Sender{CredentialsJson: "test"}
-	msg := NewMessage(map[string]string{"key": "value"}, "1")
+	msg := NewMessage(map[string]string{"key": "value"}, nil, "1")
 	if _, _, err := sender.SendNoRetry(msg); err == nil {
 		t.Fatal("test expected non-recoverable error")
 	}
@@ -143,7 +143,7 @@ func TestSendSuccess(t *testing.T) {
 	defer server.Close()
 	client, _ := getMockClient(server)
 	sender := &Sender{CredentialsJson: "test", Client: client}
-	msg := NewMessage(map[string]string{"key": "value"}, "1")
+	msg := NewMessage(map[string]string{"key": "value"}, nil, "1")
 	resp, _, err := sender.Send(msg, 1)
 	if err != nil || resp.SuccessCount != 1 {
 		t.Fatal("send should return response with one success")
@@ -157,7 +157,7 @@ func TestSendOneRetryNonrecoverableFailure(t *testing.T) {
 	)
 	defer server.Close()
 	sender := &Sender{CredentialsJson: "test"}
-	msg := NewMessage(map[string]string{"key": "value"}, "1")
+	msg := NewMessage(map[string]string{"key": "value"}, nil, "1")
 	if _, _, err := sender.Send(msg, 1); err == nil {
 		t.Fatal("send should fail after one retry")
 	}
